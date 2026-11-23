@@ -1,0 +1,296 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.css">
+<script src="https://unpkg.com/maplibre-gl@5.6.0/dist/maplibre-gl.js"></script>
+<style>
+  html, body {margin:0; padding:0; background:#ffffff; font-family: "Source Sans Pro", Arial, sans-serif; color:#1d2733;}
+  #map {position:absolute; inset:0; border-radius:18px; overflow:hidden;
+        background: radial-gradient(ellipse at center, #ffffff 0%, #e9f0f7 60%, #d9e4ef 100%); border:1px solid #e2e8f0;}
+  .panel {position:absolute; z-index:5; background:rgba(255,255,255,.93); border:1px solid #e2e8f0; box-shadow:0 2px 8px rgba(16,24,40,.08);
+          border-radius:14px; padding:10px 12px;}
+  #top {top:12px; left:50%; transform:translateX(-50%); font-size:13px; white-space:nowrap; display:flex; gap:10px; align-items:center;}
+  .live {display:inline-flex; align-items:center; gap:6px; font-weight:700; color:#3f7d0b;}
+  .dot {width:8px; height:8px; border-radius:50%; background:#5fae0e; animation:pulse 1.4s infinite;}
+  @keyframes pulse {0%{box-shadow:0 0 0 0 rgba(181,230,85,.7)}70%{box-shadow:0 0 0 8px rgba(181,230,85,0)}100%{box-shadow:0 0 0 0 rgba(181,230,85,0)}}
+  .fc {color:#d9480f; font-weight:700;}
+  #layers {top:60px; right:12px; display:flex; flex-direction:column; gap:6px; padding:8px;}
+  .btn {background:#f3f6f9; color:#1d2733; border:1px solid #dbe2ea; border-radius:999px; padding:6px 14px;
+        font-size:13px; cursor:pointer; text-align:left; min-width:100px;}
+  .btn:hover {border-color:#9bd13d;}
+  .btn.on {background:#9bd13d; color:#0b0f17; border-color:#9bd13d; font-weight:700;}
+  .btn:disabled {opacity:.4; cursor:not-allowed;}
+  .sep {height:1px; background:#e2e8f0; margin:4px 0;}
+  #legend {bottom:84px; left:12px; width:230px; font-size:12px;}
+  #legend .bar {height:10px; border-radius:5px; margin:6px 0 4px 0; position:relative;}
+  #legend .ticks {display:flex; justify-content:space-between; color:#6b7686;}
+  #time {bottom:14px; left:50%; transform:translateX(-50%); display:flex; align-items:center; gap:12px; width:72%;}
+  #play {background:#9bd13d; color:#0b0f17; border:none; border-radius:50%; width:34px; height:34px; font-size:14px; cursor:pointer; font-weight:900;}
+  #now {background:#f3f6f9; color:#1d2733; border:1px solid #dbe2ea; border-radius:999px; padding:6px 12px; cursor:pointer; font-size:12px;}
+  #slider {flex:1; accent-color:#7cb518;}
+  #tlabel {min-width:180px; font-size:13px; text-align:right;}
+  .maplibregl-popup-content {background:#ffffff; color:#1d2733; border:1px solid #9bd13d; border-radius:10px; font-size:13px; padding:10px 12px;}
+  .maplibregl-popup-tip {border-top-color:#9bd13d !important; border-bottom-color:#9bd13d !important;}
+  .maplibregl-popup-close-button {color:#1d2733;}
+  .maplibregl-ctrl-attrib {background:rgba(255,255,255,.8) !important; color:#4a5565;}
+  .maplibregl-ctrl-attrib a {color:#4a5565;}
+  .hint {color:#6b7686; font-size:12px;}
+  code {background:#f1f7e8; padding:1px 5px; border-radius:5px; color:#3f7d0b;}
+  #err {position:absolute; inset:0; display:none; align-items:center; justify-content:center; z-index:20; color:#d9480f; text-align:center; padding:20px;}
+</style>
+</head>
+<body>
+<div id="map"></div>
+<div id="err"></div>
+<div id="top" class="panel"><span class="live"><span class="dot"></span>LIVE</span>
+  <span id="title"></span><span id="state"></span></div>
+<div id="layers" class="panel"></div>
+<div id="legend" class="panel"><div id="lgtitle"></div><div class="bar" id="lgbar"></div><div class="ticks" id="lgticks"></div>
+  <div style="color:#6b7686;margin-top:4px">Black mark = WHO guideline</div><div id="eeleg"></div></div>
+<div id="time" class="panel">
+  <button id="play" title="Play / pause">▶</button>
+  <input id="slider" type="range" min="0" value="0">
+  <button id="now">Now</button>
+  <div id="tlabel"></div>
+</div>
+
+<script>
+// Data is written by app.py to globe_data.json next to this page
+const Q = new URLSearchParams(location.search);
+fetch("globe_data.json?v=" + (Q.get("v") || Date.now()))
+  .then(r => r.json())
+  .then(d => { if (Q.get("pol")) d.start_pollutant = Q.get("pol"); start(d); })
+  .catch(e => { const x = document.getElementById("err"); x.style.display = "flex";
+                x.textContent = "Could not load map data (" + e + "). Refresh the page."; });
+
+function start(D){
+const POL = D.pollutants;
+const RAMP = [[0,"#2f9e6f"],[1,"#7bd88f"],[2,"#f5d547"],[3,"#ff9f43"],[5,"#ff5c5c"],[8,"#b36bff"]];
+let pol = D.start_pollutant, frame = D.now_index, playing = false, timer = null;
+let showSurface = !!D.surface, showLabels = true, spinning = false, globe = true;
+
+if (typeof maplibregl === "undefined") {
+  const e = document.getElementById("err"); e.style.display = "flex";
+  e.innerHTML = "The map library could not load. Check your internet connection and refresh the page.";
+  return;
+}
+
+// colour expression: value / WHO guideline -> ramp ; missing (-1) -> transparent
+function colorExpr(prop, who){
+  const v = ["coalesce", ["get", prop], -1];
+  const stops = []; RAMP.forEach(([r,c]) => { stops.push(r*who, c); });
+  return ["case", ["<", v, 0], "rgba(0,0,0,0)", ["interpolate", ["linear"], v, ...stops]];
+}
+
+const ESRI = "https://server.arcgisonline.com/ArcGIS/rest/services/";
+const map = new maplibregl.Map({
+  container: "map",
+  style: {
+    version: 8,
+    projection: {type: "globe"},
+    sources: {
+      base: {type:"raster", tileSize:256, maxzoom:17, tiles:[ESRI + "World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+             attribution:"Imagery © Esri, Maxar, Earthstar Geographics, and the GIS User Community · Air: CAMS via Open-Meteo"},
+      labels: {type:"raster", tileSize:256, maxzoom:17, tiles:[ESRI + "Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}"]}
+    },
+    layers: [
+      {id:"bg", type:"background", paint:{"background-color":"#0d2b4a"}},
+      {id:"base", type:"raster", source:"base"}
+    ]
+  },
+  center: [19.0, 30], zoom: 1.6, maxZoom: 14
+});
+map.addControl(new maplibregl.NavigationControl({showCompass:true}), "top-left");
+
+// ---------- build GeoJSON ----------
+const NT = D.times.length;
+function cityGeo(){
+  return {type:"FeatureCollection", features: D.cities.map((c,i) => {
+    const props = {name:c.name, country:c.country, idx:i};
+    Object.keys(POL).forEach(p => c.v[p].forEach((x,t) => props[`${p}_${t}`] = x));
+    return {type:"Feature", geometry:{type:"Point", coordinates:[c.lon, c.lat]}, properties:props};
+  })};
+}
+function surfaceGeo(){
+  const S = D.surface, nr = S.lats.length, nc = S.lons.length, dla = S.dlat/2, dlo = S.dlon/2, feats = [];
+  for (let r=0;r<nr;r++) for (let c=0;c<nc;c++){
+    const la = S.lats[r], lo = S.lons[c], props = {};
+    let any = false;
+    for (let f=0; f<S.values.length; f++){ const v = S.values[f][r*nc+c]; props["s_"+f] = v; if (v!==null) any = true; }
+    if (!any) continue;
+    feats.push({type:"Feature", properties:props, geometry:{type:"Polygon", coordinates:[[
+      [lo-dlo, la-dla],[lo+dlo, la-dla],[lo+dlo, la+dla],[lo-dlo, la+dla],[lo-dlo, la-dla]]]}});
+  }
+  return {type:"FeatureCollection", features:feats};
+}
+function regionGeo(){
+  const R = D.region, nr = R.lats.length, nc = R.lons.length, h = R.d/2, feats = [];
+  for (let r=0;r<nr;r++) for (let c=0;c<nc;c++){
+    const v = R.values[r*nc+c]; if (v===null) continue;
+    const la = R.lats[r], lo = R.lons[c];
+    feats.push({type:"Feature", properties:{m:v}, geometry:{type:"Polygon", coordinates:[[
+      [lo-h,la-h],[lo+h,la-h],[lo+h,la+h],[lo-h,la+h],[lo-h,la-h]]]}});
+  }
+  return {type:"FeatureCollection", features:feats};
+}
+let showRegion = !!D.region, showEE = !!D.ee;
+// surface frames are 3-hourly; map the hourly frame to the nearest surface frame
+function surfFrame(){ return D.surface ? Math.min(D.surface.values.length-1, Math.round(frame / D.surface.step)) : 0; }
+
+map.on("load", () => {
+  try { map.setProjection({type: "globe"}); } catch(e) {}
+  map.setSky && map.setSky({"sky-color": "#bcd9f5", "horizon-color": "#ffffff", "fog-color": "#ffffff",
+    "atmosphere-blend": ["interpolate", ["linear"], ["zoom"], 0, 1, 5, 1, 7, 0]});
+  if (D.ee){
+    map.addSource("ee", {type:"raster", tiles:[D.ee.tiles], tileSize:256, attribution:"Satellite layer: Google Earth Engine"});
+    map.addLayer({id:"ee", type:"raster", source:"ee", paint:{"raster-opacity":0.75}});
+  }
+  if (D.region){
+    map.addSource("region", {type:"geojson", data: regionGeo()});
+    map.addLayer({id:"region", type:"fill", source:"region", paint:{"fill-opacity":0.6, "fill-antialias":false}});
+  }
+  if (D.surface){
+    map.addSource("surf", {type:"geojson", data: surfaceGeo()});
+    map.addLayer({id:"surf", type:"fill", source:"surf", paint:{"fill-opacity":0.62, "fill-antialias":false}});
+  }
+  map.addLayer({id:"labels", type:"raster", source:"labels"});
+  map.addSource("cities", {type:"geojson", data: cityGeo()});
+  if (D.focus){
+    new maplibregl.Marker({color:"#d7191c"}).setLngLat([D.focus.lon, D.focus.lat])
+      .setPopup(new maplibregl.Popup({offset:20}).setHTML(`<b>${D.focus.name}</b>`)).addTo(map);
+    setTimeout(() => map.flyTo({center:[D.focus.lon, D.focus.lat], zoom:5.2, duration:2500}), 600);
+  }
+  map.addLayer({id:"city-glow", type:"circle", source:"cities", paint:{
+    "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 7, 6, 16], "circle-blur": 1, "circle-opacity": .55}});
+  map.addLayer({id:"city", type:"circle", source:"cities", paint:{
+    "circle-radius": ["interpolate", ["linear"], ["zoom"], 1, 3.5, 6, 8],
+    "circle-stroke-color": "#ffffff", "circle-stroke-width": 1.2}});
+  render();
+  setupEvents();
+});
+
+// ---------- drawing ----------
+function render(){
+  const who = POL[pol].who;
+  if (map.getLayer("city")){
+    map.setPaintProperty("city", "circle-color", colorExpr(`${pol}_${frame}`, who));
+    map.setPaintProperty("city-glow", "circle-color", colorExpr(`${pol}_${frame}`, who));
+  }
+  if (map.getLayer("surf")){
+    map.setPaintProperty("surf", "fill-color", colorExpr(`s_${surfFrame()}`, POL.pm2_5.who));
+    map.setLayoutProperty("surf", "visibility", showSurface && pol === "pm2_5" ? "visible" : "none");
+  }
+  if (map.getLayer("labels")) map.setLayoutProperty("labels", "visibility", showLabels ? "visible" : "none");
+  if (map.getLayer("region")){
+    map.setPaintProperty("region", "fill-color", colorExpr("m", POL[D.region.pol].who));
+    map.setLayoutProperty("region", "visibility", showRegion ? "visible" : "none");
+  }
+  if (map.getLayer("ee")) map.setLayoutProperty("ee", "visibility", showEE ? "visible" : "none");
+  drawLegend(); drawTime(); buildButtons();
+}
+
+function drawLegend(){
+  const who = POL[pol].who;
+  const stops = RAMP.map(([r,c]) => `${c} ${r/8*100}%`).join(",");
+  const bar = document.getElementById("lgbar");
+  bar.style.background = `linear-gradient(90deg, ${stops})`;
+  bar.innerHTML = `<div style="position:absolute;left:${100/8}%;top:-2px;width:2px;height:14px;background:#111"></div>`;
+  document.getElementById("lgtitle").innerHTML = `<b>${POL[pol].label}</b> · µg/m³` +
+    (D.surface && pol !== "pm2_5" && showSurface ? ` <span class="hint">(surface: PM2.5 only)</span>` : "");
+  document.getElementById("lgticks").innerHTML = [0,1,2,3,5,8].map(x => `<span>${Math.round(who*x)}</span>`).join("");
+  const ee = document.getElementById("eeleg");
+  if (D.ee && showEE){
+    ee.innerHTML = `<div style="margin-top:8px"><b>Satellite</b> · ${D.ee.label}</div>
+      <div class="bar" style="background:linear-gradient(90deg, ${D.ee.palette.join(",")})"></div>
+      <div class="ticks"><span>${(+D.ee.min).toPrecision(3)}</span><span>${D.ee.unit}</span><span>${(+D.ee.max).toPrecision(3)}</span></div>`;
+  } else ee.innerHTML = "";
+  if (D.region && showRegion) document.getElementById("lgtitle").innerHTML += `<div class="hint">Selection: ${D.region.label}</div>`;
+}
+
+const slider = document.getElementById("slider"); slider.max = NT-1;
+function fmt(i){
+  const t = D.times[i], d = new Date(t + "Z");
+  const day = d.toLocaleDateString("en-GB", {weekday:"short", day:"2-digit", month:"short", timeZone:"UTC"});
+  const dh = i - D.now_index;
+  return `${day} ${t.substr(11,5)} UTC (${dh===0 ? "now" : (dh>0 ? "+"+dh+" h" : dh+" h")})`;
+}
+function drawTime(){
+  slider.value = frame;
+  document.getElementById("tlabel").textContent = fmt(frame);
+  document.getElementById("title").textContent = `${POL[pol].label} · world`;
+  const dh = frame - D.now_index;
+  document.getElementById("state").innerHTML = dh>0 ? `<span class="fc">FORECAST</span>` : (dh===0 ? "latest hour" : "past");
+}
+
+function buildButtons(){
+  const box = document.getElementById("layers"); box.innerHTML = "";
+  Object.keys(POL).forEach(k => {
+    const b = document.createElement("button"); b.className = "btn" + (k===pol ? " on" : ""); b.textContent = POL[k].label;
+    b.onclick = () => { pol = k; render(); }; box.appendChild(b);
+  });
+  box.appendChild(Object.assign(document.createElement("div"), {className:"sep"}));
+  const toggles = [
+    ["Surface", () => showSurface, v => showSurface = v, !!D.surface],
+    ["Labels", () => showLabels, v => showLabels = v, true],
+    ["Selection", () => showRegion, v => showRegion = v, !!D.region],
+    ["Satellite", () => showEE, v => showEE = v, !!D.ee],
+    ["Spin", () => spinning, v => spinning = v, true],
+    ["Globe", () => globe, v => { globe = v; map.setProjection({type: v ? "globe" : "mercator"}); }, true],
+  ];
+  toggles.forEach(([name, get, set, ok]) => {
+    const b = document.createElement("button"); b.className = "btn" + (get() ? " on" : "");
+    b.textContent = (get() ? "● " : "○ ") + name; b.disabled = !ok;
+    if (!ok) b.title = "Load the world surface below the map first";
+    b.onclick = () => { set(!get()); render(); }; box.appendChild(b);
+  });
+}
+
+// ---------- interaction ----------
+function setupEvents(){
+  const pop = new maplibregl.Popup({closeButton:false, closeOnClick:false, offset:10});
+  map.on("mousemove", "city", e => {
+    map.getCanvas().style.cursor = "pointer";
+    const p = e.features[0].properties, v = p[`${pol}_${frame}`];
+    const who = POL[pol].who;
+    pop.setLngLat(e.lngLat).setHTML(`<b>${p.name}</b>, ${p.country}<br>${POL[pol].label}: ` +
+      (v===null || v===undefined || v==="null" ? "no data" : `<b>${(+v).toFixed(1)}</b> µg/m³ · ${(v/who).toFixed(1)}× WHO`)).addTo(map);
+  });
+  map.on("mouseleave", "city", () => { map.getCanvas().style.cursor = ""; pop.remove(); });
+
+  map.on("click", async e => {
+    const la = e.lngLat.lat.toFixed(2), lo = e.lngLat.lng.toFixed(2);
+    const p = new maplibregl.Popup({offset:8}).setLngLat(e.lngLat)
+      .setHTML(`<b>${la}, ${lo}</b><br><span class="hint">Loading air quality…</span>`).addTo(map);
+    let html = `<b>${la}, ${lo}</b><br>`;
+    try {
+      const url = `https://air-quality-api.open-meteo.com/v1/air-quality?latitude=${la}&longitude=${lo}` +
+                  `&current=pm2_5,pm10,nitrogen_dioxide,ozone&timezone=auto`;
+      const r = await fetch(url); const j = await r.json(); const c = j.current || {};
+      html += Object.keys(POL).map(k => `${POL[k].label}: <b>${c[k]===undefined||c[k]===null ? "–" : (+c[k]).toFixed(1)}</b>`).join(" · ");
+      html += `<br><span class="hint">Now (${(c.time||"").replace("T"," ")} local)</span>`;
+    } catch(err) { html += `<span class="hint">Could not load values here.</span>`; }
+    html += `<br><span class="hint">To analyse, type in the assistant:</span><br><code>Analyse ${la}, ${lo} last 30 days</code>`;
+    p.setHTML(html);
+  });
+
+  let interacting = false;
+  map.on("mousedown", () => interacting = true); map.on("mouseup", () => interacting = false);
+  map.on("touchstart", () => interacting = true); map.on("touchend", () => interacting = false);
+  setInterval(() => {
+    if (!spinning || interacting || !globe) return;
+    const c = map.getCenter(); c.lng -= 0.6; map.easeTo({center:c, duration:100, easing:t=>t});
+  }, 100);
+}
+
+slider.oninput = () => { frame = +slider.value; render(); };
+document.getElementById("now").onclick = () => { frame = D.now_index; render(); };
+document.getElementById("play").onclick = () => {
+  playing = !playing; document.getElementById("play").textContent = playing ? "❚❚" : "▶";
+  if (playing) timer = setInterval(() => { frame = (frame + 1) % NT; render(); }, 350);
+  else clearInterval(timer);
+};
+}
+</script>
+</body>
+</html>

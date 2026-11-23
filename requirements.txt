@@ -1,0 +1,10 @@
+streamlit>=1.40
+pandas>=2.0
+numpy>=1.26
+requests>=2.27
+altair>=5
+scikit-learn>=1.4
+matplotlib>=3.8
+pyshp>=2.3
+python-docx>=1.1
+earthengine-api>=1.0
