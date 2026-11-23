@@ -460,7 +460,7 @@ with g_col:
     if not target.exists() or st.session_state.get("_globe_v") != version:
         target.write_text(blob, encoding="utf-8")
         st.session_state["_globe_v"] = version
-    st.iframe(f"/app/static/globe.html?v={version}", height=680)
+    st.iframe(f"app/static/globe.html?v={version}", height=680)
     c1, c2 = st.columns([3, 1.2])
     c1.markdown('<div class="src">Drag to spin · scroll to zoom · hover a city · <b>click anywhere</b> for that '
                 'spot\'s air quality · ▶ plays yesterday → 3-day forecast.</div>', unsafe_allow_html=True)
