@@ -268,9 +268,14 @@ def fig_corr(d, feats, pol, label):
 # ---------------------------------------------------------------------------
 def describe(res, label):
     t, tr = res["test"], res["train"]
-    out = [f"{res['name']} was trained on {res['n_train']} hours and tested on {res['n_test']} hours it had not seen. "
-           f"On the test hours it explained {t['R²'] * 100:.0f}% of the variation in {label} (R² = {t['R²']:.2f}), "
-           f"with a typical error of {t['MAE']:.1f} µg/m³ (MAE) and RMSE = {t['RMSE']:.1f} µg/m³."]
+    head = (f"{res['name']} was trained on {res['n_train']} hours and tested on {res['n_test']} hours it had not seen. ")
+    if t["R²"] >= 0:
+        head += (f"On the test hours it explained {t['R²'] * 100:.0f}% of the variation in {label} "
+                 f"(R² = {t['R²']:.2f}), ")
+    else:
+        head += f"On the test hours it could not explain the variation in {label} (R² = {t['R²']:.2f}), "
+    head += f"with a typical error of {t['MAE']:.1f} µg/m³ (MAE) and RMSE = {t['RMSE']:.1f} µg/m³."
+    out = [head]
     if tr["R²"] - t["R²"] > 0.25:
         out.append(f"The training R² ({tr['R²']:.2f}) is much higher than the test R², which suggests overfitting: "
                    "the model learned patterns of the training period that did not carry over.")
